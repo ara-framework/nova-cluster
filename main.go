@@ -12,15 +12,18 @@ import (
 	"github.com/imdario/mergo"
 )
 
+// ViewDefinition contains the server which can render it.
 type ViewDefinition struct {
 	Server string
 }
 
+// ViewJob is request view for hypernova.
 type ViewJob struct {
 	Name string      `json:"name"`
 	Data interface{} `json:"data"`
 }
 
+// ViewJobResult is the view result from hypernova.
 type ViewJobResult struct {
 	Name     string       `json:"name"`
 	Html     string       `json:"html"`
@@ -29,13 +32,26 @@ type ViewJobResult struct {
 	Error    ViewJobError `json:"error"`
 }
 
+// ViewJobError is an error happened during and after a view is requesting.
 type ViewJobError struct {
 	Name    string `json:"name"`
 	Message string `json:"message"`
 }
 
+// BatchResponse is an respose which contains several view job results.
 type BatchResponse struct {
 	Results map[string]ViewJobResult `json:"results"`
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Access-Control-Allow-Origin", "*")
+		w.Header().Add("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Add("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		if r.Method != "OPTIONS" {
+			next.ServeHTTP(w, r)
+		}
+	})
 }
 
 func BatchRequest(server string, batch map[string]ViewJob) BatchResponse {
@@ -47,10 +63,28 @@ func BatchRequest(server string, batch map[string]ViewJob) BatchResponse {
 
 	payload := string(b)
 
+	var response BatchResponse
+
 	resp, reqErr := http.Post(server, "application/json", strings.NewReader(payload))
 
 	if reqErr != nil {
-		log.Fatal(reqErr)
+		log.Println(reqErr)
+		response = BatchResponse{
+			Results: make(map[string]ViewJobResult),
+		}
+
+		for uuid, job := range batch {
+			response.Results[uuid] = ViewJobResult{
+				Name:    job.Name,
+				Success: false,
+				Error: ViewJobError{
+					Name:    "ConnectionRefused",
+					Message: reqErr.Error(),
+				},
+			}
+		}
+
+		return response
 	}
 
 	defer resp.Body.Close()
@@ -60,8 +94,6 @@ func BatchRequest(server string, batch map[string]ViewJob) BatchResponse {
 	if bodyErr != nil {
 		log.Fatal(bodyErr)
 	}
-
-	var response BatchResponse
 
 	json.Unmarshal(body, &response)
 
@@ -153,7 +185,8 @@ func BatchHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 
 	router := mux.NewRouter()
-	router.HandleFunc("/batch", BatchHandler).Methods("POST")
+	router.Use(corsMiddleware)
 
+	router.HandleFunc("/batch", BatchHandler).Methods("OPTIONS", "POST")
 	http.ListenAndServe(":8000", router)
 }
