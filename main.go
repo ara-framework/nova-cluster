@@ -5,9 +5,11 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
+	"github.com/gookit/color"
 	"github.com/gorilla/mux"
 	"github.com/imdario/mergo"
 )
@@ -101,10 +103,10 @@ func BatchRequest(server string, batch map[string]ViewJob) BatchResponse {
 }
 
 func GetViewDefintions() map[string]ViewDefinition {
-	dat, err := ioutil.ReadFile("./views.json")
+	dat, err := ioutil.ReadFile(os.Getenv("CONFIG_FILE"))
 
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Config file not found")
 	}
 
 	var viewDefinitions map[string]ViewDefinition
@@ -114,72 +116,72 @@ func GetViewDefintions() map[string]ViewDefinition {
 	return viewDefinitions
 }
 
-func BatchHandler(w http.ResponseWriter, r *http.Request) {
-	b, err := ioutil.ReadAll(r.Body)
+func BatchHandler(viewDefinitions map[string]ViewDefinition) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := ioutil.ReadAll(r.Body)
 
-	if err != nil {
-		log.Fatal(err)
-	}
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	var viewRequests map[string]ViewJob
+		var viewRequests map[string]ViewJob
 
-	json.Unmarshal(b, &viewRequests)
+		json.Unmarshal(b, &viewRequests)
 
-	viewDefinitions := GetViewDefintions()
+		aggregatedResponse := BatchResponse{
+			Results: make(map[string]ViewJobResult),
+		}
 
-	aggregatedResponse := BatchResponse{
-		Results: make(map[string]ViewJobResult),
-	}
+		batches := make(map[string]map[string]ViewJob)
 
-	batches := make(map[string]map[string]ViewJob)
+		for uuid, job := range viewRequests {
+			server := viewDefinitions[job.Name].Server
 
-	for uuid, job := range viewRequests {
-		server := viewDefinitions[job.Name].Server
-
-		if server == "" {
-			aggregatedResponse.Results[uuid] = ViewJobResult{
-				Name:    job.Name,
-				Success: false,
-				Error: ViewJobError{
-					Name:    "ReferenceError",
-					Message: "Component\"" + job.Name + "\" not registered in cluster",
-				},
+			if server == "" {
+				aggregatedResponse.Results[uuid] = ViewJobResult{
+					Name:    job.Name,
+					Success: false,
+					Error: ViewJobError{
+						Name:    "ReferenceError",
+						Message: "Component\"" + job.Name + "\" not registered in cluster",
+					},
+				}
+				continue
 			}
-			continue
+
+			if batches[server] == nil {
+				batch := make(map[string]ViewJob)
+				batches[server] = batch
+			}
+
+			batches[server][uuid] = job
 		}
 
-		if batches[server] == nil {
-			batch := make(map[string]ViewJob)
-			batches[server] = batch
+		var wg sync.WaitGroup
+		var batchResponsesMap sync.Map
+
+		for server, batch := range batches {
+			wg.Add(1)
+
+			go func(server string, batch map[string]ViewJob) {
+				response := BatchRequest(server, batch)
+				batchResponsesMap.Store(server, response)
+				defer wg.Done()
+			}(server, batch)
 		}
 
-		batches[server][uuid] = job
+		wg.Wait()
+
+		for server := range batches {
+			response, _ := batchResponsesMap.Load(server)
+
+			batchResponse := response.(BatchResponse)
+			mergo.Merge(&aggregatedResponse.Results, batchResponse.Results)
+		}
+
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(aggregatedResponse)
 	}
-
-	var wg sync.WaitGroup
-	var batchResponsesMap sync.Map
-
-	for server, batch := range batches {
-		wg.Add(1)
-
-		go func(server string, batch map[string]ViewJob) {
-			response := BatchRequest(server, batch)
-			batchResponsesMap.Store(server, response)
-			defer wg.Done()
-		}(server, batch)
-	}
-
-	wg.Wait()
-
-	for server := range batches {
-		response, _ := batchResponsesMap.Load(server)
-
-		batchResponse := response.(BatchResponse)
-		mergo.Merge(&aggregatedResponse.Results, batchResponse.Results)
-	}
-
-	w.Header().Add("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(aggregatedResponse)
 }
 
 func main() {
@@ -187,6 +189,16 @@ func main() {
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
 
-	router.HandleFunc("/batch", BatchHandler).Methods("OPTIONS", "POST")
-	http.ListenAndServe(":8000", router)
+	viewDefinitions := GetViewDefintions()
+
+	router.HandleFunc("/batch", BatchHandler(viewDefinitions)).Methods("OPTIONS", "POST")
+
+	port := os.Getenv("PORT")
+
+	if len(port) == 0 {
+		port = "8000"
+	}
+
+	color.Info.Printf("Nova cluster running on http://0.0.0.0:%s\n", port)
+	http.ListenAndServe(":"+port, router)
 }
