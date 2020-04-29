@@ -25,6 +25,14 @@ type ViewJob struct {
 	Data interface{} `json:"data"`
 }
 
+type NovaClient struct {
+	Src string `json:"src"`
+}
+
+type Meta struct {
+	NovaClient NovaClient `json:"novaClient"`
+}
+
 // ViewJobResult is the view result from hypernova.
 type ViewJobResult struct {
 	Name     string       `json:"name"`
@@ -32,6 +40,7 @@ type ViewJobResult struct {
 	Duration float32      `json:"duration"`
 	Success  bool         `json:"success"`
 	Error    ViewJobError `json:"error"`
+	Meta     Meta         `json:"meta"`
 }
 
 // ViewJobError is an error happened during and after a view is requesting.
